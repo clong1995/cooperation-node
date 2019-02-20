@@ -1,12 +1,23 @@
 {
   "name": "cooperation",
-  "version": "1.0.16",
-  "description": "",
+  "version": "1.0.18",
+  "description": "用于多人合作模块化开发",
   "main": "",
   "scripts": {
 
   },
-  "author": "clong1995",
+  "author": {
+    "name": "clong1995",
+    "email": "2435965705@qq.com"
+  },
+	"homepage": "https://github.com/clong1995/cooperation#readme",
+	"repository": {
+	  "type": "git",
+	  "url": "git+https://github.com/clong1995/cooperation.git"
+	},
+	"keywords": [
+	  
+	],
   "license": "ISC",
   "dependencies": {
 
