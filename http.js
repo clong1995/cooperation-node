@@ -4,8 +4,10 @@ const url = require('url');
 //const querystring = require('querystring');
 const fs = require("fs");
 const path = require("path");
-
-//多网卡情况后期支持
+const minify = require('html-minifier').minify;
+const terser = require("terser");
+const kill = require('kill-port');
+//多网卡情况后期支持测试
 
 /**
  * http服务，
@@ -48,8 +50,7 @@ module.exports = ({
 
     //TODO 检查目录结构是否存在，不存在则创建
 
-    //启用http创建一个端口为HOST的服务
-    http.createServer((req, res) => {
+    let server = (req, res) => {
         if (cors) {
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.setHeader('Access-Control-Allow-Credentials', true);
@@ -99,7 +100,7 @@ module.exports = ({
                         try {
                             let getData = url.parse(req.url, true).query;
                             if (typeof requestInterceptor === 'function') {
-                                let flag = requestInterceptor(req,getData);
+                                let flag = requestInterceptor(req, getData);
                                 if (flag) {
                                     output(res, flag, 'api');
                                     return;
@@ -166,8 +167,25 @@ module.exports = ({
                                     //编译html中的图片路径
                                     files['app.html'] = htmlImgCompiler(arr[1], '', files['app.html']);
 
+                                    //编译css中的图片
+                                    files['style.css'] = moduleCssCompiler(arr[1], '', files['style.css']);
                                     //执行拼装
                                     make(files, pathDir, html => {
+                                        //压缩
+                                        if (!dev) {
+                                            html = minify(html, {
+                                                collapseWhitespace: true,
+                                                conservativeCollapse: true,
+                                                keepClosingSlash: true,
+                                                minifyCSS: true,
+                                                minifyJS: (text, inline) => terser.minify(text).code,
+                                                minifyURLs: true,
+                                                removeScriptTypeAttributes: true,
+                                                removeStyleLinkTypeAttributes: true,
+                                                removeComments: true
+                                            });
+                                        }
+
                                         //输出
                                         output(res, html, 'page');
                                         //缓存
@@ -180,12 +198,19 @@ module.exports = ({
                 })
             }
         }
-    }).listen(port);
+    }
 
-    //回调
-    cb && cb(port);
-
-    console.log('http listen port => ' + port);
+    //启用http创建一个端口为HOST的服务
+    kill(port).then(value => {
+        http.createServer(server).listen(port);
+        console.log('http listen port => ' + port);
+        if (typeof cb === 'function') {
+            cb();
+        }
+    }, reason => {
+        console.error(reason);
+        return;
+    })
 };
 
 
@@ -281,6 +306,11 @@ function make(files, mainPath, cb) {
     let html = files['app.html'],
         style = files['style.css'],
         script = files['script.js'];
+
+    //删除注释
+    html = html.replace(/<!--.*-->/gim, '');
+
+
     //修改对象
     script = script.replace(/class (\S*) {/, `
     const app = new class{
@@ -298,6 +328,10 @@ function make(files, mainPath, cb) {
             let module = this.getModule(moduleName);
             module.destroy();
             this.moduleMap.delete(moduleName);
+        }
+        reloadModule(name = null) {
+            name ? this.getModule(name).init()
+                : this.moduleMap.forEach(v => v.init  &&v.init());
         }
     `);
     //追加模块操作函数
@@ -428,9 +462,10 @@ function make(files, mainPath, cb) {
 function htmler(style, script, html) {
     let styleDom = style ? '<style>' + style + '</style>' : '',
         scriptDom = script ? '<script>document.addEventListener("DOMContentLoaded", () => {' + script + '\n})</script>' : '';
-        //scriptDom = script ? '<script>window.onload = () => {' + script + '\n}</script>' : '';
+    //scriptDom = script ? '<script>window.onload = () => {' + script + '\n}</script>' : '';
     html = html.replace('</head>', styleDom + '</head>');
     html = html.replace('</head>', scriptDom + '</head>');
+
     return html;
 }
 
@@ -446,16 +481,18 @@ function htmlImgCompiler(pageName, moduleName, htmlStr) {
     if (arr) {
         let imgLen = arr.length;
         for (var i = 0; i < imgLen; ++i) {
-            let srcAttr = arr[i].match(srcReg)[1];
-            if (!srcAttr.indexOf('img/')) {
-                //替换掉img标签标签内的src
-                let newImg = arr[i].replace(srcAttr, '/' + pageName + '/' + moduleName + srcAttr);
-                //替换掉页面里的img标签
-                htmlStr = htmlStr.replace(arr[i], newImg);
-            } else if (!srcAttr.indexOf('/img/')) {
-                //页面的图片
-                htmlStr = htmlStr.replace(srcAttr, '/' + pageName + srcAttr);
-
+            let srcAttr = arr[i].match(srcReg);
+            if (srcAttr && srcAttr.length >= 2) {
+                let src = srcAttr[1];
+                if (!srcAttr.indexOf('img/')) {
+                    //替换掉img标签标签内的src
+                    let newImg = arr[i].replace(srcAttr, '/' + pageName + '/' + moduleName + srcAttr);
+                    //替换掉页面里的img标签
+                    htmlStr = htmlStr.replace(arr[i], newImg);
+                } else if (!srcAttr.indexOf('/img/')) {
+                    //页面的图片
+                    htmlStr = htmlStr.replace(srcAttr, '/' + pageName + srcAttr);
+                }
             }
         }
     }
@@ -476,26 +513,29 @@ function moduleHtmlCompiler(pageName, moduleName, htmlStr, moduleStr, html, domA
 //编译css
 function moduleCssCompiler(pageName, moduleName, cssStr) {
     let backgroundReg = /.*background[^;"]+url\(([^\)]+)\).*/gi,
-        urlReg = /url\(['"]?([^'"]*)['"]\)?/i;
+        urlReg = /url\(['".]?([^'".]*)['".]\)?/i;
     let wrapCss = '';
     let arr = cssStr.match(backgroundReg);
-
-    //console.log(arr);
-
     if (arr) {
         let backgroundLen = arr.length;
         for (var i = 0; i < backgroundLen; i++) {
-            let url = arr[i].match(urlReg)[1];
-            if (!url.indexOf('img/')) {
-                //替换内部的
-                let newImg = arr[i].replace(url, '/' + pageName + '/' + moduleName + '/' + url);
-                //替换文件里的
-                cssStr = cssStr.replace(arr[i], newImg);
-            } else if (!url.indexOf('/img/')) {
-                cssStr = cssStr.replace(url, '/' + pageName + url);
+            let urlArr = arr[i].match(urlReg);
+            if(urlArr && urlArr.length >=2){
+                let url = urlArr[1]
+                if (!url.indexOf('img/')) {
+                    //替换内部的
+                    let newImg = arr[i].replace(url, '/' + pageName + '/' + moduleName + '/' + url);
+                    //替换文件里的
+                    cssStr = cssStr.replace(arr[i], newImg);
+                } else if (!url.indexOf('/img/')) {
+                    let newImg = arr[i].replace(url, '/' + pageName + url);
+                    cssStr = cssStr.replace(arr[i], newImg);
+                }
             }
         }
     }
+
+
 
     //兼容多写
     let cssArr = cssStr.split('}');
@@ -504,8 +544,15 @@ function moduleCssCompiler(pageName, moduleName, cssStr) {
         let start = v.indexOf('{');
         let name = v.substr(0, start);
         let value = v.substr(start || 0);
-        if (name.includes(',')) name = name.replace(',', ',#' + moduleName + '>');
-        wrapCss += '\n#' + moduleName + '>' + name + value + '}'
+        if (moduleName) {
+            if (name.includes(','))
+                name = name.replace(',', ',#' + moduleName + '>');
+            wrapCss += '\n#' + moduleName + '>' + name + value + '}'
+        } else {
+            wrapCss += '\n' + name + value + '}'
+        }
+
+
     });
     return wrapCss;
 }
